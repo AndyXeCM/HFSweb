@@ -46,9 +46,22 @@
         const PLAYER_SPEED = 200.0; // Base speed units/sec
         const AFTERBURNER_MULTIPLIER = 3.0;
         const ROLL_SPEED = Math.PI * 1.0; // Radians per second
-        const PITCH_SPEED = Math.PI * 0.8; // Radians per second
         const YAW_SPEED = Math.PI * 0.5; // Radians per second
-        const DAMPING = 0.95; // Velocity damping factor
+        // --- Aircraft Physics (tweak these) ---
+        const AIRCRAFT_MASS = 1200;
+        const AIRCRAFT_INERTIA = 900;
+        const THRUST_FORCE = 8000;
+        const LIFT_COEFFICIENT = 0.08;
+        const DRAG_COEFFICIENT = 0.006;
+        const GRAVITY_ACCELERATION = 9.8;
+        const STALL_SPEED = 30;
+        const STALL_AOA_DEGREES = 20;
+        const MAX_ELEVATOR_AUTHORITY = 1.6;
+        const PITCH_TORQUE_COEFFICIENT = 3.2;
+        const ROLL_TORQUE_COEFFICIENT = 4.5;
+        const YAW_TORQUE_COEFFICIENT = 2.2;
+        const ANGULAR_DAMPING = 0.985;
+        const MAX_PHYSICS_SPEED = PLAYER_SPEED * AFTERBURNER_MULTIPLIER;
         const CAMERA_BASE_FOV = 75;
         const CAMERA_MAX_FOV_BOOST = 25; // Additional FOV at max speed boost
         const UPDATE_INTERVAL_MS = 100; // Send updates every 100ms (10 Hz)
@@ -1655,29 +1668,29 @@
         function setupControls() {
             document.addEventListener('keydown', (event) => {
                 switch(event.code) {
-                    case 'KeyW': case 'ArrowUp':    controls.forward = 1; break;
-                    case 'KeyS': case 'ArrowDown':  controls.backward = 1; break; // Optional: Brake/Reverse?
+                    case 'ArrowUp':                 controls.forward = 1; break;
+                    case 'ArrowDown':               controls.backward = 1; break; // Optional: Brake/Reverse?
                     case 'KeyA': case 'ArrowLeft':  controls.left = 1; break; // Yaw left
                     case 'KeyD': case 'ArrowRight': controls.right = 1; break; // Yaw right
                     case 'KeyQ':                    controls.rollLeft = 1; break; // Roll left
                     case 'KeyE':                    controls.rollRight = 1; break; // Roll right
                     case 'ShiftLeft': case 'ShiftRight': controls.boost = 1; break;
-                    case 'ControlLeft': case 'ControlRight': controls.down = 1; break; // Pitch down
-                    case 'Space':                   controls.up = 1; break;     // Pitch up
+                    case 'KeyW': case 'Space':      controls.up = 1; break; // Pitch up
+                    case 'KeyS': case 'ControlLeft': case 'ControlRight': controls.down = 1; break; // Pitch down
                 }
             });
 
             document.addEventListener('keyup', (event) => {
                  switch(event.code) {
-                    case 'KeyW': case 'ArrowUp':    controls.forward = 0; break;
-                    case 'KeyS': case 'ArrowDown':  controls.backward = 0; break;
+                    case 'ArrowUp':                 controls.forward = 0; break;
+                    case 'ArrowDown':               controls.backward = 0; break;
                     case 'KeyA': case 'ArrowLeft':  controls.left = 0; break;
                     case 'KeyD': case 'ArrowRight': controls.right = 0; break;
                     case 'KeyQ':                    controls.rollLeft = 0; break;
                     case 'KeyE':                    controls.rollRight = 0; break;
                     case 'ShiftLeft': case 'ShiftRight': controls.boost = 0; break;
-                    case 'ControlLeft': case 'ControlRight': controls.down = 0; break;
-                    case 'Space':                   controls.up = 0; break;
+                    case 'KeyW': case 'Space':      controls.up = 0; break;
+                    case 'KeyS': case 'ControlLeft': case 'ControlRight': controls.down = 0; break;
                 }
             });
         }
@@ -1867,7 +1880,7 @@
                 }
             }
 
-            updatePlayerMovement(deltaTime);
+            updatePlane(deltaTime);
             updateCameraFOV();
             updateDayNightCycle(deltaTime);
             checkCollisions();
@@ -1902,92 +1915,77 @@
             updateInfoPanel();
         }
 
-        function updatePlayerMovement(deltaTime) {
+        function updatePlane(deltaTime) {
             if (!playerAircraft) return;
 
-            const currentSpeed = playerVelocity.length();
-            const maxSpeed = PLAYER_SPEED * (controls.boost ? AFTERBURNER_MULTIPLIER : 1.0);
+            const speed = playerVelocity.length();
+            const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(playerAircraft.quaternion).normalize();
+            const up = new THREE.Vector3(0, 1, 0).applyQuaternion(playerAircraft.quaternion).normalize();
 
-            // --- Calculate Forces/Torques ---
-            let thrust = controls.forward ? PLAYER_SPEED * 5.0 : 0; // Acceleration force
-            thrust = thrust * (controls.boost ? AFTERBURNER_MULTIPLIER : 1.0);
-            // Optional: Add braking force if controls.backward is used
-            // if (controls.backward) thrust = -PLAYER_SPEED * 2.0;
+            // --- A. Calculate Forces ---
+            const thrustInput = (controls.forward ? 1 : 0) - (controls.backward ? 1 : 0);
+            const thrustScale = controls.boost ? AFTERBURNER_MULTIPLIER : 1.0;
+            const thrustForce = forward.clone().multiplyScalar(thrustInput * THRUST_FORCE * thrustScale);
 
-            let targetPitch = 0;
-            if (controls.up) targetPitch = PITCH_SPEED;
-            if (controls.down) targetPitch = -PITCH_SPEED;
-
-            let targetYaw = 0;
-            if (controls.left) targetYaw = YAW_SPEED;
-            if (controls.right) targetYaw = -YAW_SPEED;
-
-            let targetRoll = 0;
-            if (controls.rollLeft) targetRoll = ROLL_SPEED;
-            if (controls.rollRight) targetRoll = -ROLL_SPEED;
-
-            // --- Apply Angular Velocity ---
-            // Simple angular acceleration based on input
-            playerAngularVelocity.x += (targetPitch - playerAngularVelocity.x) * deltaTime * 5.0; // Pitch
-            playerAngularVelocity.y += (targetYaw - playerAngularVelocity.y) * deltaTime * 5.0;   // Yaw
-            playerAngularVelocity.z += (targetRoll - playerAngularVelocity.z) * deltaTime * 5.0; // Roll
-
-            // Apply damping to angular velocity
-            playerAngularVelocity.multiplyScalar(DAMPING);
-
-            // --- Apply Rotation ---
-            const deltaRotation = playerAngularVelocity.clone().multiplyScalar(deltaTime);
-            const qx = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), deltaRotation.x);
-            const qy = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), deltaRotation.y);
-            const qz = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1), deltaRotation.z);
-
-            // Apply rotations in aircraft's local frame
-            playerAircraft.quaternion.multiply(qx).multiply(qy).multiply(qz).normalize();
-
-
-            // --- Apply Linear Velocity ---
-            // Original: Forward is defined as +Z in model space
-            // const forwardVector = new THREE.Vector3(0, 0, 1).applyQuaternion(playerAircraft.quaternion);
-            
-            // Modified approach: Try using -Z as forward direction
-            const forwardVector = new THREE.Vector3(0, 0, -1).applyQuaternion(playerAircraft.quaternion);
-            
-            // Using the original approach with model rotations applied earlier
-            // const forwardVector = new THREE.Vector3(0, 0, 1).applyQuaternion(playerAircraft.quaternion);
-            const acceleration = forwardVector.multiplyScalar(thrust * deltaTime);
-
-            playerVelocity.add(acceleration);
-
-            // Apply damping/drag
-            const dragFactor = 1.0 - (0.5 * deltaTime); // Simple linear drag
-            playerVelocity.multiplyScalar(dragFactor);
-
-            // Clamp speed
-            if (playerVelocity.lengthSq() > maxSpeed * maxSpeed) {
-                playerVelocity.normalize().multiplyScalar(maxSpeed);
-            }
-
-             // Minimum speed to prevent floating still
-            const MIN_SPEED = 5.0;
-            if (currentSpeed < MIN_SPEED && thrust === 0) {
-                 playerVelocity.multiplyScalar(0.9); // Slow down faster when idle and slow
-                 if (currentSpeed < 0.1) playerVelocity.set(0,0,0);
-            }
-
-
-            // --- Update Position ---
-            const deltaPosition = playerVelocity.clone().multiplyScalar(deltaTime);
-            playerAircraft.position.add(deltaPosition);
-
-            // --- Ground Collision (Simple - Adjust Y level slightly) ---
-            // Since terrain has hills, Y=0 is no longer ground level everywhere.
-            // This check is INACCURATE but prevents falling through the absolute bottom.
-            const approximateGroundLevel = 10; // Raise slightly (adjust based on hill amplitude)
-            if (playerAircraft && playerAircraft.position.y < approximateGroundLevel + 1) { // +1 for aircraft size buffer
-                playerAircraft.position.y = approximateGroundLevel + 1;
-                if (playerVelocity) { // Check if playerVelocity exists
-                    playerVelocity.y = Math.max(0, playerVelocity.y * -0.5); // Bounce slightly
+            let liftFactor = speed > STALL_SPEED ? 1.0 : 0.2;
+            if (speed > 0.001) {
+                const velocityDir = playerVelocity.clone().normalize();
+                const aoaRadians = Math.acos(THREE.MathUtils.clamp(forward.dot(velocityDir), -1, 1));
+                const aoaDegrees = THREE.MathUtils.radToDeg(aoaRadians);
+                if (aoaDegrees > STALL_AOA_DEGREES) {
+                    const aoaExcess = THREE.MathUtils.clamp((aoaDegrees - STALL_AOA_DEGREES) / STALL_AOA_DEGREES, 0, 1);
+                    liftFactor *= THREE.MathUtils.lerp(1.0, 0.05, aoaExcess);
                 }
+            }
+
+            const liftMagnitude = speed * speed * LIFT_COEFFICIENT * liftFactor;
+            const liftForce = up.clone().multiplyScalar(liftMagnitude);
+
+            const dragForce = speed > 0.001
+                ? playerVelocity.clone().normalize().multiplyScalar(-speed * speed * DRAG_COEFFICIENT)
+                : new THREE.Vector3();
+
+            const gravityForce = new THREE.Vector3(0, -GRAVITY_ACCELERATION * AIRCRAFT_MASS, 0);
+            const totalForce = thrustForce.add(liftForce).add(dragForce).add(gravityForce);
+
+            // --- B. Calculate Torque ---
+            const pitchInput = (controls.up ? 1 : 0) - (controls.down ? 1 : 0);
+            const yawInput = (controls.left ? 1 : 0) - (controls.right ? 1 : 0);
+            const rollInput = (controls.rollLeft ? 1 : 0) - (controls.rollRight ? 1 : 0);
+            const elevatorAuthority = THREE.MathUtils.clamp((speed * speed) * 0.0001, 0, MAX_ELEVATOR_AUTHORITY);
+
+            const localTorque = new THREE.Vector3(
+                pitchInput * PITCH_TORQUE_COEFFICIENT * elevatorAuthority,
+                yawInput * YAW_TORQUE_COEFFICIENT * elevatorAuthority,
+                rollInput * ROLL_TORQUE_COEFFICIENT * elevatorAuthority
+            );
+
+            // --- C. Integration (Euler) ---
+            const acceleration = totalForce.multiplyScalar(1 / AIRCRAFT_MASS);
+            playerVelocity.add(acceleration.multiplyScalar(deltaTime));
+
+            if (playerVelocity.lengthSq() > MAX_PHYSICS_SPEED * MAX_PHYSICS_SPEED) {
+                playerVelocity.normalize().multiplyScalar(MAX_PHYSICS_SPEED);
+            }
+
+            playerAircraft.position.add(playerVelocity.clone().multiplyScalar(deltaTime));
+
+            const angularAcc = localTorque.multiplyScalar(1 / AIRCRAFT_INERTIA);
+            playerAngularVelocity.add(angularAcc.multiplyScalar(deltaTime));
+
+            playerAngularVelocity.multiplyScalar(ANGULAR_DAMPING);
+
+            const deltaRotation = playerAngularVelocity.clone().multiplyScalar(deltaTime);
+            const deltaQuaternion = new THREE.Quaternion().setFromEuler(
+                new THREE.Euler(deltaRotation.x, deltaRotation.y, deltaRotation.z, 'XYZ')
+            );
+            playerAircraft.quaternion.multiply(deltaQuaternion).normalize();
+
+            // --- Ground Collision (Simple) ---
+            const approximateGroundLevel = 10;
+            if (playerAircraft.position.y < approximateGroundLevel + 1) {
+                playerAircraft.position.y = approximateGroundLevel + 1;
+                if (playerVelocity.y < 0) playerVelocity.y = 0;
             }
         }
 
